@@ -26,9 +26,11 @@ from dotenv import load_dotenv
 dotenv_path = os.path.join(os.path.dirname(__file__), "..", '.env')
 if os.path.exists(dotenv_path):
     load_dotenv(dotenv_path=dotenv_path)
-    
+
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+
+
 def get_s3_client():
     s3_client = boto3.client('s3',
                              aws_access_key_id=AWS_ACCESS_KEY_ID,
@@ -44,48 +46,20 @@ sdxlpredictor.setup()
 S3_CLIENT = get_s3_client()
 # %%
 
+def convert_to_text(word_level_transcript):
+    text = " ".join([w['word'] for w in word_level_transcript])
+    return text
 
 
-
-def chunk_level_transcript(word_level_transcript, chunk_size_s=3):
-    chunked_ts = []
-    start_t = 0
-    started = False
-    end_t = 0
-    chunk = []
-    
-    for i in range(0, len(word_level_transcript)):
-        chunk.append(word_level_transcript[i])
-        if not started:
-            start_t = float(word_level_transcript[i]['start'])
-            started = True
-        end_t = float(word_level_transcript[i]['end'])
-        delta = end_t - start_t
-        if delta >= chunk_size_s:
-            chunk_words_str = " ".join([w['word'] for w in chunk])
-            chunk_start = chunk[0]['start']
-            chunk_end = chunk[-1]['end']
-            chunked_ts.append(
-                {"start": chunk_start, "end": chunk_end, "segment": chunk_words_str})
-            started = False
-            chunk = []
-            
-    if len(chunk) > 0:
-        chunk_words_str = " ".join([w['word'] for w in chunk])
-        chunk_start = chunk[0]['start']
-        chunk_end = chunk[-1]['end']
-        chunked_ts.append(
-            {"start": chunk_start, "end": chunk_end, "segment": chunk_words_str})
-    return chunked_ts
-
-def convert_to_srt(word_level_transcript):
-    srt = ""
-    for i, word in enumerate(word_level_transcript):
-        srt += f"{i + 1}\n"
-        srt += f"{word['start']} --> {word['end']}\n"
-        srt += f"{word['segment']}\n\n"
-    return srt
-
+def give_context(word_level_transcript,
+                 context_start_s,
+                 context_end_s,
+                 context_buffer_s=5):
+    context = ""
+    for word in word_level_transcript:
+        if float(word['start']) >= context_start_s - context_buffer_s and float(word['end']) <= context_end_s + context_buffer_s:
+            context += word['word'] + " "
+    return context
 
 
 # %%
@@ -99,19 +73,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 def validate_KV_pair(dict_list):
     for d in dict_list:
         check_all_keys = all(
-            k in d for k in ("description", "start", "end"))
+            k in d for k in ("description"))
 
         check_description = isinstance(d['description'], str)
-        try:
-            d['start'] = float(d['start'])
-            d['end'] = float(d['end'])
-        except:
-            return False
-        check_start = isinstance(d['start'], float)
-        check_end = isinstance(d['end'], float)
-
-        return check_all_keys and check_description \
-            and check_start and check_end
+        return check_all_keys and check_description
 
 
 def json_corrector(json_str,
@@ -169,7 +134,9 @@ def json_corrector(json_str,
 
 
 def fetch_broll_description(wordlevel_info,
-                            num_images,
+                            context_start_s,
+                            context_end_s,
+                            context_buffer_s,
                             url,
                             openaiapi_key):
 
@@ -185,26 +152,29 @@ def fetch_broll_description(wordlevel_info,
         "content-type": "application/json",
         "Authorization": "Bearer {}".format(openaiapi_key)}
 
-    chunklevelinfo = chunk_level_transcript(wordlevel_info, chunk_size_s=5)
-    subtitles = convert_to_srt(chunklevelinfo)
+    transcript = convert_to_text(wordlevel_info)
+    context = give_context(wordlevel_info, context_start_s,
+                           context_end_s, context_buffer_s)
 
-    prompt_prefix = """{}
+    prompt_prefix = """Complete Transcript:
+    {}
+    ----
+    Time Stamped Context:
+    {}
+    ----
     
-    Given the subtitles of a video, generate very relevant stock image descriptions to insert as B-roll images.
-    The start and end timestamps of the B-roll images should perfectly match with the content that is spoken at that time.
-    Strictly don't include any exact word or text labels to be depicted in the images.
-    Don't make the timestamps of different illustrations overlap.
-    Leave enough time gap between different B-Roll image appearances so that the original footage is also played as necessary.
-    Strictly output only JSON in the output using the format (BE CAREFUL NOT TO MISS ANY COMMAS, QUOTES OR SEMICOLONS ETC)-""".format(subtitles)
+    Given the Transcript of a video, generate very relevant stock image description to insert as B-roll image.
+    The description of B-roll images should perfectly match with the context that is provided.
+    Strictly don't include any exact word or text labels to be depicted in the image.
+    Strictly output only JSON in the output using the format (BE CAREFUL NOT TO MISS ANY COMMAS, QUOTES OR SEMICOLONS ETC)-""".format(transcript,
+                                                                                                                                      context)
 
     sample = [
-        {"description": "...", "start": "...", "end": "..."},
-        {"description": "...", "start": "...", "end": "..."}
+        {"description": "..."}
     ]
 
-    prompt = prompt_prefix + json.dumps(sample) + f"""\nMake the start and end timestamps a minimum duration of more than 3 seconds.
-    Also, place them at the appropriate timestamp position where the relevant context is being spoken in the transcript. 
-    Be sure to only make {num_images} jsons. \nJSON:"""
+    prompt = prompt_prefix + json.dumps(sample) + f"""\n
+    Be sure to only make 1 json. \nJSON:"""
 
     # Define the payload for the chat model
     messages = [
@@ -318,15 +288,18 @@ def upload_image_to_s3(image, bucket, s3_client):
 
 
 def pipeline(word_level_transcript,
-             num_images=3,
+             context_start_s=0,
+             context_end_s=0,
+             context_buffer_s=5,
              broll_image_steps=50,
              openaiapi_key=os.getenv("OPENAI_API_KEY"),
              ):
 
-
     # Fetch B-roll descriptions
     broll_descriptions, err_msg = fetch_broll_description(word_level_transcript,
-                                                          num_images,
+                                                          context_start_s,
+                                                          context_end_s,
+                                                          context_buffer_s,
                                                           chatgpt_url,
                                                           openaiapi_key)
     if err_msg != "" and broll_descriptions is None:
@@ -339,8 +312,6 @@ def pipeline(word_level_transcript,
     for i, img in enumerate(allimages):
         img_info = upload_image_to_s3(img, "brollimages", S3_CLIENT)
         img_info['description'] = broll_descriptions[i]['description']
-        img_info['start'] = broll_descriptions[i]['start']
-        img_info['end'] = broll_descriptions[i]['end']
         img_upload_info.append(img_info)
 
     return img_upload_info
@@ -350,9 +321,14 @@ def pipeline(word_level_transcript,
 if __name__ == "__main__":
     from example import example_transcript
 
+    context_start_s = 12
+    context_end_s = 30
+    context_buffer_s = 5
+
     img_info = pipeline(example_transcript,
-                        num_images=3,
+                        context_start_s=context_start_s,
+                        context_end_s=context_end_s,
+                        context_buffer_s=context_buffer_s,
                         broll_image_steps=50,
-                        SD_model="lykon/dreamshaper-8-lcm",
                         openaiapi_key=OPENAI_API_KEY)
 # %%
