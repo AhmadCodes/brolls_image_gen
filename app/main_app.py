@@ -70,12 +70,17 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # %%
 
 
-def validate_KV_pair(dict_list):
+def validate_KV_pair(dict_list,
+                     debug=False):
     for d in dict_list:
-        check_all_keys = all(
-            k in d for k in ("description"))
+        check_all_keys = all([k in d.keys() for k in ['description']])
 
         check_description = isinstance(d['description'], str)
+        
+        if debug:
+            print("check_all_keys: ", check_all_keys)
+            print("check_description: ", check_description)
+        
         return check_all_keys and check_description
 
 
@@ -138,7 +143,8 @@ def fetch_broll_description(wordlevel_info,
                             context_end_s,
                             context_buffer_s,
                             url,
-                            openaiapi_key):
+                            openaiapi_key,
+                            debug=False):
 
     success = False
     err_msg = ""
@@ -164,14 +170,12 @@ def fetch_broll_description(wordlevel_info,
     ----
     
     Given the Transcript of a video, generate very relevant stock image description to insert as B-roll image.
-    The description of B-roll images should perfectly match with the context that is provided.
+    The description of B-roll images should perfectly match with the context window that is provided.
     Strictly don't include any exact word or text labels to be depicted in the image.
     Strictly output only JSON in the output using the format (BE CAREFUL NOT TO MISS ANY COMMAS, QUOTES OR SEMICOLONS ETC)-""".format(transcript,
                                                                                                                                       context)
 
-    sample = [
-        {"description": "..."}
-    ]
+    sample = {"description": "..."}
 
     prompt = prompt_prefix + json.dumps(sample) + f"""\n
     Be sure to only make 1 json. \nJSON:"""
@@ -208,9 +212,12 @@ def fetch_broll_description(wordlevel_info,
             continue
         # Extract data from the API's response
         try:
-            output = json.loads(
+            output_ = json.loads(
                 response_json['choices'][0]['message']['content'].strip())
-            success = validate_KV_pair(output)
+            output = [output_]
+            if debug:
+                print("output: ", output)
+            success = validate_KV_pair(output, debug=debug)
             if success:
                 print("JSON: ", output)
                 success = True
@@ -293,6 +300,7 @@ def pipeline(word_level_transcript,
              context_buffer_s=5,
              broll_image_steps=50,
              openaiapi_key=os.getenv("OPENAI_API_KEY"),
+             debug=False
              ):
 
     # Fetch B-roll descriptions
@@ -301,7 +309,10 @@ def pipeline(word_level_transcript,
                                                           context_end_s,
                                                           context_buffer_s,
                                                           chatgpt_url,
-                                                          openaiapi_key)
+                                                          openaiapi_key,
+                                                          debug = debug)
+    if debug:
+        print("B-roll descriptions: ", broll_descriptions)
     if err_msg != "" and broll_descriptions is None:
         return err_msg
 
@@ -330,5 +341,6 @@ if __name__ == "__main__":
                         context_end_s=context_end_s,
                         context_buffer_s=context_buffer_s,
                         broll_image_steps=50,
-                        openaiapi_key=OPENAI_API_KEY)
+                        openaiapi_key=OPENAI_API_KEY,
+                        debug=True)
 # %%
